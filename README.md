@@ -1,51 +1,51 @@
-#Automated Deployment Bash Script
+# Automated Deployment Bash Script
 
 
-##Overview
+## Overview
 This repository contains a Bash script (deploy.sh) designed to automate the setup, deployment, and configuration of a Dockerized application on a remote Linux server. The script is built to be robust, idempotent, and production-grade, with error handling, logging, and validation at each stage. It follows the requirements outlined in the DevOps Intern Stage 1 Task.
 This script is POSIX-compliant and executable (run 'chmod +x deploy.sh' before use). It does not rely on external configuration management tools like Ansible or Terraform.
 
 
-##Prerequisites
-###Local Machine:
+## Prerequisites
+### Local Machine:
 Git installed.
 SSH key-based access to the remote server (no password prompts).
 rsync and ssh commands available.
 
-###Remote Server:
+### Remote Server:
 Linux distribution (tested on Ubuntu/Debian; may require adjustments for others like CentOS).
 sudo privileges for the SSH user (for package installation and service management).
 Internet access for installing Docker, Docker Compose, and Nginx.
 
-###Repository:
+### Repository:
 A GitHub repository with a Dockerfile.
 A Personal Access Token (PAT) with repo read permissions.
 
-###Application:
+### Application:
 The app should expose a port (via EXPOSE in Dockerfile) that matches the user-provided application port.
 
 
-##Usage
+## Usage
 **Clone this repository:**
 - git clone <your-repo-url>
 - cd <repo-name>
 
-##Make the script executable:
+## Make the script executable:
 - chmod +x deploy.sh
 
-##Run the script:
+## Run the script:
 - bash deploy.sh
 
 The script will prompt for inputs: Git Repo URL, PAT, Branch (default: main), SSH Username, Server IP, SSH Key Path, Application Port.
 All actions are logged to a timestamped file (deploy_YYYYMMDD_HHMMSS.log).
 
 
-##For cleanup (optional):
+## For cleanup (optional):
 **bash deploy.sh --cleanup**
 This removes deployed resources (containers, Nginx config, files) without prompts.
 
 
-##Script Workflow
+## Script Workflow
 **The script performs the following steps sequentially:**
 - **Collect Parameters:** Prompts and validates user inputs.
 - **Clone Repository:** Clones or pulls the latest from the specified Git repo/branch using PAT.
@@ -58,7 +58,7 @@ This removes deployed resources (containers, Nginx config, files) without prompt
 - **Validate Deployment:** Checks services, container health, and accessibility via curl.
 - **Logging & Error Handling:** Logs all actions; traps errors for graceful failure.
 
-###Example Inputs
+### Example Inputs
 - **Git Repository URL:** https://github.com/username/my-app-repo.git
 - **Personal Access Token:** ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 - **Branch:** main
@@ -67,11 +67,11 @@ This removes deployed resources (containers, Nginx config, files) without prompt
 - **SSH Key Path:** ~/.ssh/id_rsa
 - **Application Port:** 8080 (must match the app's listening port)
 
-###Testing
+### Testing
 - **Tested on Ubuntu 22.04 remote server.**
 - **Sample app included:** A simple Flask app (Fapp.py, Dockerfile, requirements.txt) for demonstration.
 
-##Limitations & Improvements
+## Limitations & Improvements
 - Assumes Debian-based remote OS; add distro detection for broader support.
 - No SSL configuration (placeholder for Certbot/self-signed cert can be added).
 - Sensitive inputs (e.g., PAT) are not hidden; use read -s for production.
