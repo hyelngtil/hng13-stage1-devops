@@ -60,10 +60,10 @@ This removes deployed resources (containers, Nginx config, files) without prompt
 
 ### Example Inputs
 - **Git Repository URL:** https://github.com/username/my-app-repo.git
-- **Personal Access Token:** ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+- **Personal Access Token:** ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 - **Branch:** main
 - **SSH Username:** ubuntu
-- **Server IP:** 192.168.1.100
+- **Server IP:** remote_server_IP_address
 - **SSH Key Path:** ~/.ssh/id_rsa
 - **Application Port:** 8080 (must match the app's listening port)
 
