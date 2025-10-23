@@ -1,11 +1,11 @@
 #!/bin/bash
 
-set -euo pipefail  # Exit on error, undefined variables, pipe failures
+set -euo pipefail
 
 # Create timestamped log file
 LOG_FILE="deploy_$(date +%Y%m%d_%H%M%S).log"
 
-# Function to log messages
+# Log messages
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
@@ -13,7 +13,7 @@ log() {
 # Trap errors
 trap 'log "ERROR: Script failed at line $LINENO"' ERR
 
-# Function to read input with validation
+# Read input with validation
 read_input() {
     local prompt="$1"
     local var_name="$2"
@@ -30,37 +30,53 @@ read_input() {
     echo "$value"
 }
 
-# Collect parameters
+# Gather inputs
+
 GIT_REPO=$(read_input "Enter Git Repository URL" "GIT_REPO")
-PAT=$(read_input "Enter Personal Access Token" "PAT")
 BRANCH=$(read_input "Enter branch name [main]" "BRANCH" "main")
+
+# PAT: Silent read, validate non-empty
+echo -n "PAT: "; stty -echo; read -r PAT; stty echo; echo
+[[ -n "$PAT" ]] || { echo "Error: PAT required" >&2; exit 1; }
+
 SSH_USER=$(read_input "Enter SSH username" "SSH_USER")
 SERVER_IP=$(read_input "Enter server IP address" "SERVER_IP")
-SSH_KEY=$(read_input "Enter SSH key path" "SSH_KEY")
 APP_PORT=$(read_input "Enter application port" "APP_PORT")
+SSH_KEY=$(read_input "Enter SSH key path" "SSH_KEY")
+#: Silent, validate file/permissions
+#echo -n "SSH Key Path: "; stty -echo; read -r SSH_KEY; stty echo; echo
+#[[ -f "$SSH_KEY" ]] || { echo "Error: Key invalid" >&2; exit 1; }
+#chmod 600 "$SSH_KEY" || log "WARN: chmod 400 failed for $SSH_KEY (continuing)"
 
-# Function to clone repository
+# Clone Git repository with authentication (not exposing PAT)
 clone_repo() {
-    local repo_url="$1"
-    local token="$2"
-    local branch="$3"
-    
-    # Extract repo name
+    local repo_url="$1" token="$2" branch="$3"
     REPO_NAME=$(basename "$repo_url" .git)
-    
-    # Construct authenticated URL
-    AUTH_URL=$(echo "$repo_url" | sed "s|https://|https://${token}@|")
-    
+    export REPO_NAME
+
+    # create a temporary GIT_ASKPASS helper that prints the PAT
+    TMP_ASKPASS="$(mktemp)"
+    cat > "$TMP_ASKPASS" <<'EOF'
+#!/bin/sh
+# Git calls this script to obtain a password. It expects the password on stdout.
+echo "$GIT_PASSWORD"
+EOF
+    chmod +x "$TMP_ASKPASS"
+
+    # Use GIT_ASKPASS to provide the token securely to git
     if [[ -d "$REPO_NAME" ]]; then
-        log "Repository exists, pulling latest changes..."
-        cd "$REPO_NAME"
-        git pull origin "$branch" || exit 2
+        log "Repository exists, updating to latest changes on branch '$branch'..."
+        cd "$REPO_NAME" || { rm -f "$TMP_ASKPASS"; exit 2; }
+        GIT_PASSWORD="$token" GIT_ASKPASS="$TMP_ASKPASS" git fetch origin || { rm -f "$TMP_ASKPASS"; exit 2; }
+        GIT_PASSWORD="$token" GIT_ASKPASS="$TMP_ASKPASS" git checkout "$branch" || { rm -f "$TMP_ASKPASS"; exit 2; }
+        GIT_PASSWORD="$token" GIT_ASKPASS="$TMP_ASKPASS" git pull origin "$branch" || { rm -f "$TMP_ASKPASS"; exit 2; }
     else
-        log "Cloning repository..."
-        git clone -b "$branch" "$AUTH_URL" || exit 2
-        cd "$REPO_NAME"
+        log "Cloning repository on branch '$branch'..."
+        GIT_PASSWORD="$token" GIT_ASKPASS="$TMP_ASKPASS" git clone -b "$branch" "$repo_url" || { rm -f "$TMP_ASKPASS"; exit 2; }
+        cd "$REPO_NAME" || { rm -f "$TMP_ASKPASS"; exit 2; }
     fi
-    
+
+    rm -f "$TMP_ASKPASS"
     log "Successfully cloned/updated repository"
 }
 
@@ -77,11 +93,9 @@ verify_docker_config() {
 
 # Function to test SSH connection
 test_ssh() {
-    local user="$1"
-    local ip="$2"
-    local key="$3"
+    local user="$1" ip="$2" key="$3"
     
-    log "Testing SSH connection..."
+    log "Testing SSH connection to $user@$ip..."
     
     if ssh -i "$key" -o ConnectTimeout=10 -o BatchMode=yes \
            "$user@$ip" "echo 'SSH connection successful'" &>/dev/null; then
@@ -95,9 +109,7 @@ test_ssh() {
 
 # Function to setup remote environment
 setup_remote_environment() {
-    local user="$1"
-    local ip="$2"
-    local key="$3"
+    local user="$1" ip="$2" key="$3"
     
     log "Setting up remote environment..."
     
@@ -142,16 +154,14 @@ ENDSSH
 
 # Deploy Docker application
 deploy_application() {
-    local user="$1"
-    local ip="$2"
-    local key="$3"
-    local app_port="$4"
+    local user="$1" ip="$2" key="$3" app_port="$4"
     
     log "Deploying application..."
     
-    ssh -i "$key" "$user@$ip" bash -s << ENDSSH
+    ssh -i "$key" "$user@$ip" bash -s << ENDSSH || { log "✗ Deploy failed (check connection/logs)"; exit 1; }
         set -e
-        cd ~/deployment/$REPO_NAME
+        mkdir -p ~/deployment
+        cd ~/deployment/$REPO_NAME || { echo "Error: Repo dir not found" >&2; exit 1; }
         
         # Stop old containers
         docker-compose down 2>/dev/null || docker stop \$(docker ps -q) 2>/dev/null || true
@@ -161,7 +171,7 @@ deploy_application() {
 
         # Build and start
         if [[ -f "docker-compose.yml" ]]; then
-            docker-compose up -d --build
+            docker-compose up -d --build --force-recreate
         else
             docker build -t my-app .
             docker run -d -p $app_port:$app_port --name my-app my-app
@@ -171,50 +181,45 @@ deploy_application() {
         sleep 5
         
         # Verify container is running
-        docker ps | grep -E "my-app|$REPO_NAME"
+        if docker ps | grep -qE "my-app|$REPO_NAME"; then
+            echo "✓ Containers running"
+        else
+            echo "✗ No running containers found" >&2
+            exit 1
+        fi
 ENDSSH
-    
     log "✓ Application deployed successfully"
 }
 
 # Function to transfer application files to the remote server
 transfer_files() {
-    local user="$1"
-    local ip="$2"
-    local key="$3"
-    local local_dir="$4"
+    local user="$1" ip="$2" key="$3" local_dir="$4"
     
     log "Transferring application files..."
     
-    # 1. Ensure the remote deployment directory exists
+    # Ensure the remote deployment directory exists
     ssh -i "$key" "$user@$ip" "mkdir -p ~/deployment" || exit 9
     
     # The REPO_NAME is globally available from the clone_repo call
     local REPO_TO_COPY="$local_dir/$REPO_NAME"
-    
-    # Check for the local directory before copying
     if [[ ! -d "$REPO_TO_COPY" ]]; then
         log "ERROR: Local repository directory '$REPO_TO_COPY' not found."
         exit 10
     fi
 
-    # Clean up existing remote repo dir to avoid conflicts/permissions issues
-    ssh -i "$key" "$user@$ip" "rm -rf ~/deployment/$REPO_NAME" || true
+    # Optional: Clean up existing remote repo dir to avoid conflicts/permissions issues
+    #ssh -i "$key" "$user@$ip" "rm -rf ~/deployment/$REPO_NAME" || true
     
-    # Copy the repository folder recursively into the remote deployment folder
-    #scp -r -i "$key" "$REPO_TO_COPY" "$user@$ip:~/deployment/" || exit 11
     # Transfer with rsync, excluding .git and logs
-    rsync -avz -e "ssh -i $key" --exclude='.git/' --exclude='deploy_*.log' "$REPO_TO_COPY/" "$user@$ip:~/deployment/$REPO_NAME/" || exit 11
+    rsync -avz -e "ssh -i '$key'" --exclude='.git/' --exclude='deploy_*.log' "$REPO_TO_COPY/" "$user@$ip:~/deployment/$REPO_NAME/" || exit 11
+
 
     log "✓ Files transferred successfully to ~/deployment/$REPO_NAME"
 }
 
 # Configure Nginx as reverse proxy
 configure_nginx() {
-    local user="$1"
-    local ip="$2"
-    local key="$3"
-    local app_port="$4"
+    local user="$1" ip="$2" key="$3" app_port="$4"
     
     log "Configuring Nginx..."
     
@@ -246,44 +251,51 @@ ENDSSH
 }
 
 validate_deployment() {
-    local user="$1"
-    local ip="$2"
-    local key="$3"
+    local user="$1" ip="$2" key="$3"
     
     log "Validating deployment..."
     
-    # Check Docker service
-    ssh -i "$key" "$user@$ip" "systemctl is-active docker" || exit 5
-    
-    # Check container health
-    ssh -i "$key" "$user@$ip" "docker ps --filter 'status=running'" || exit 6
-    
-    # Check Nginx
-    ssh -i "$key" "$user@$ip" "systemctl is-active nginx" || exit 7
-    
-    # Test endpoint
-    if curl -f -s "http://$ip" > /dev/null; then
-        log "✓ Application is accessible"
+    # Check container health with fallback if no HEALTHCHECK is defined
+    CONTAINER_NAME="my-app"
+    HEALTH_STATUS=$(ssh -i "$key" "$user@$ip" "docker inspect --format '{{.State.Health.Status}}' $CONTAINER_NAME 2>/dev/null || true")
+
+
+    if [[ -n "$HEALTH_STATUS" ]]; then
+        if [[ "$HEALTH_STATUS" != "healthy" ]]; then
+            log "✗ Container $CONTAINER_NAME not healthy (status: $HEALTH_STATUS)"
+            exit 6
+        fi
     else
-        log "✗ Application not accessible"
-        exit 8
+        # Fallback: ensure container exists and is running
+        if ! ssh -i "$key" "$user@$ip" "docker ps --filter name=$CONTAINER_NAME --filter status=running --format '{{.Names}}' | grep -q ."; then
+            log "✗ Container $CONTAINER_NAME not running"
+            exit 6
+        fi
     fi
-    
+
+    # App endpoint with retries
+    MAX_RETRIES=3
+    for i in $(seq 1 $MAX_RETRIES); do
+        if curl -f -s "http://$ip/" > /dev/null; then
+            log "✓ Application /health accessible"
+            break
+        fi
+        [[ $i -eq $MAX_RETRIES ]] && { log "✗ /health failed after $MAX_RETRIES tries"; exit 8; }
+        sleep $((i * 2))  # Backoff: 2s, 4s, 6s
+    done
     log "✓ All validation checks passed"
 }
 
 cleanup() {
-    local user="$1"
-    local ip="$2"
-    local key="$3"
+    local user="$1" ip="$2" key="$3"
     
     log "Cleaning up deployment..."
     
-    ssh -i "$key" "$user@$ip" bash -s << 'ENDSSH'
+    ssh -i "$key" "$user@$ip" bash -s << 'ENDSSH' || exit 15
         # Stop and remove containers
         docker-compose down -v 2>/dev/null || true
-        docker stop $(docker ps -aq) 2>/dev/null || true
-        docker rm $(docker ps -aq) 2>/dev/null || true
+        docker stop $(docker ps -aq --filter "name=^my-app") 2>/dev/null || true
+        docker rm $(docker ps -aq --filter "name=^my-app") 2>/dev/null || true
         
         # Remove Nginx config
         sudo rm -f /etc/nginx/sites-enabled/app.conf
@@ -324,5 +336,4 @@ main() {
     log "===== Deployment Completed Successfully ====="
 }
 
-# Run main function
 main
